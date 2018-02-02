@@ -84,12 +84,11 @@ class MapReduce implements Executable
      *    This is not supported for server versions < 3.4 and will result in an
      *    exception at execution time if used.
      *
-     *  * finalize (MongoDB\BSON\Javascript): Follows the reduce method and
-     *    modifies the output.
+     *  * finalize (MongoDB\BSON\JavascriptInterface): Follows the reduce method
+     *    and modifies the output.
      *
      *  * jsMode (boolean): Specifies whether to convert intermediate data into
-     *    BSON format between the execution of the map and reduce functions. The
-     *    default is false.
+     *    BSON format between the execution of the map and reduce functions.
      *
      *  * limit (integer): Specifies a maximum number of documents for the input
      *    into the map function.
@@ -108,6 +107,8 @@ class MapReduce implements Executable
      *
      *  * readPreference (MongoDB\Driver\ReadPreference): Read preference.
      *
+     *    This option is ignored if results are output to a collection.
+     *
      *  * scope (document): Specifies global variables that are accessible in
      *    the map, reduce and finalize functions.
      *
@@ -120,7 +121,7 @@ class MapReduce implements Executable
      *    applied to the returned Cursor (it is not sent to the server).
      *
      *  * verbose (boolean): Specifies whether to include the timing information
-     *    in the result information. The default is true.
+     *    in the result information.
      *
      *  * writeConcern (MongoDB\Driver\WriteConcern): Write concern. This only
      *    applies when results are output to a collection.
@@ -142,11 +143,6 @@ class MapReduce implements Executable
             throw InvalidArgumentException::invalidType('$out', $out, 'string or array or object');
         }
 
-        $options += [
-            'jsMode' => false,
-            'verbose' => true,
-        ];
-
         if (isset($options['bypassDocumentValidation']) && ! is_bool($options['bypassDocumentValidation'])) {
             throw InvalidArgumentException::invalidType('"bypassDocumentValidation" option', $options['bypassDocumentValidation'], 'boolean');
         }
@@ -155,7 +151,7 @@ class MapReduce implements Executable
             throw InvalidArgumentException::invalidType('"collation" option', $options['collation'], 'array or object');
         }
 
-        if (isset($options['finalize']) && ! $options['finalize'] instanceof Javascript) {
+        if (isset($options['finalize']) && ! $options['finalize'] instanceof JavascriptInterface) {
             throw InvalidArgumentException::invalidType('"finalize" option', $options['finalize'], 'MongoDB\Driver\Javascript');
         }
 
@@ -243,8 +239,15 @@ class MapReduce implements Executable
             throw UnsupportedException::writeConcernNotSupported();
         }
 
-        $readPreference = isset($this->options['readPreference']) ? $this->options['readPreference'] : null;
-        $cursor = $server->executeCommand($this->databaseName, $this->createCommand($server), $readPreference);
+        $hasOutputCollection = ! \MongoDB\is_mapreduce_output_inline($this->out);
+
+        $command = $this->createCommand($server);
+        $options = $this->createOptions($hasOutputCollection);
+
+        $cursor = $hasOutputCollection
+            ? $server->executeReadWriteCommand($this->databaseName, $command, $options)
+            : $server->executeReadCommand($this->databaseName, $command, $options);
+
         $result = current($cursor->toArray());
 
         $getIterator = $this->createGetIteratorCallable($result, $server);
@@ -267,7 +270,7 @@ class MapReduce implements Executable
             'out' => $this->out,
         ];
 
-        foreach (['finalize', 'jsMode', 'limit', 'maxTimeMS', 'readConcern', 'verbose', 'writeConcern'] as $option) {
+        foreach (['finalize', 'jsMode', 'limit', 'maxTimeMS', 'verbose'] as $option) {
             if (isset($this->options[$option])) {
                 $cmd[$option] = $this->options[$option];
             }
@@ -322,5 +325,32 @@ class MapReduce implements Executable
         }
 
         throw new UnexpectedValueException('mapReduce command did not return inline results or an output collection');
+    }
+
+    /**
+     * Create options for executing the command.
+     *
+     * @see http://php.net/manual/en/mongodb-driver-server.executereadcommand.php
+     * @see http://php.net/manual/en/mongodb-driver-server.executereadwritecommand.php
+     * @param boolean $hasOutputCollection
+     * @return array
+     */
+    private function createOptions($hasOutputCollection)
+    {
+        $options = [];
+
+        if (isset($this->options['readConcern'])) {
+            $options['readConcern'] = $this->options['readConcern'];
+        }
+
+        if ( ! $hasOutputCollection && isset($this->options['readPreference'])) {
+            $options['readPreference'] = $this->options['readPreference'];
+        }
+
+        if ($hasOutputCollection && isset($this->options['writeConcern'])) {
+            $options['writeConcern'] = $this->options['writeConcern'];
+        }
+
+        return $options;
     }
 }

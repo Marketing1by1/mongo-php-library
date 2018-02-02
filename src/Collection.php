@@ -18,6 +18,8 @@
 namespace MongoDB;
 
 use MongoDB\BSON\JavascriptInterface;
+use MongoDB\BSON\Serializable;
+use MongoDB\ChangeStream as ChangeStreamResult;
 use MongoDB\Driver\Cursor;
 use MongoDB\Driver\Manager;
 use MongoDB\Driver\ReadConcern;
@@ -30,6 +32,7 @@ use MongoDB\Exception\UnsupportedException;
 use MongoDB\Model\IndexInfoIterator;
 use MongoDB\Operation\Aggregate;
 use MongoDB\Operation\BulkWrite;
+use MongoDB\Operation\ChangeStream;
 use MongoDB\Operation\CreateIndexes;
 use MongoDB\Operation\Count;
 use MongoDB\Operation\DeleteMany;
@@ -282,8 +285,8 @@ class Collection
      */
     public function createIndex($key, array $options = [])
     {
-        $indexOptions = array_diff_key($options, ['writeConcern' => 1]);
-        $commandOptions = array_intersect_key($options, ['writeConcern' => 1]);
+        $indexOptions = array_diff_key($options, ['maxTimeMS' => 1, 'writeConcern' => 1]);
+        $commandOptions = array_intersect_key($options, ['maxTimeMS' => 1, 'writeConcern' => 1]);
 
         return current($this->createIndexes([['key' => $key] + $indexOptions], $commandOptions));
     }
@@ -828,7 +831,7 @@ class Collection
      */
     public function mapReduce(JavascriptInterface $map, JavascriptInterface $reduce, $out, array $options = [])
     {
-        $hasOutputCollection = ! $this->isOutInline($out);
+        $hasOutputCollection = ! \MongoDB\is_mapreduce_output_inline($out);
 
         if ( ! isset($options['readPreference'])) {
             $options['readPreference'] = $this->readPreference;
@@ -936,6 +939,32 @@ class Collection
         return $operation->execute($server);
     }
 
+    /*
+     * ChangeStream outline
+     *
+     * @see ChangeStream::__construct() for supported options
+     * @param array          $pipeline       List of pipeline operations
+     * @param array          $options        Command options
+     * @throws InvalidArgumentException for parameter/option parsing errors
+     * @return ChangeStreamResult
+     */
+    public function watch(array $pipeline = [], array $options = [])
+    {
+        if ( ! isset($options['readPreference'])) {
+            $options['readPreference'] = $this->readPreference;
+        }
+
+        $server = $this->manager->selectServer($options['readPreference']);
+
+        if ( ! isset($options['readConcern'])) {
+            $options['readConcern'] = $this->readConcern;
+        }
+
+        $operation = new ChangeStream($this->databaseName, $this->collectionName, $pipeline, $options, $this->manager);
+
+        return $operation->execute($server);
+    }
+
     /**
      * Get a clone of this collection with different options.
      *
@@ -954,20 +983,5 @@ class Collection
         ];
 
         return new Collection($this->manager, $this->databaseName, $this->collectionName, $options);
-    }
-
-    private function isOutInline($out)
-    {
-        if ( ! is_array($out) && ! is_object($out)) {
-            return false;
-        }
-
-        $out = (array) $out;
-
-        if (key($out) === 'inline') {
-            return true;
-        }
-
-        return false;
     }
 }

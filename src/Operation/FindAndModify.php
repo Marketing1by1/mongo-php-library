@@ -36,6 +36,7 @@ use MongoDB\Exception\UnsupportedException;
  */
 class FindAndModify implements Executable
 {
+    private static $wireVersionForArrayFilters = 6;
     private static $wireVersionForCollation = 5;
     private static $wireVersionForDocumentLevelValidation = 4;
     private static $wireVersionForWriteConcern = 4;
@@ -48,6 +49,12 @@ class FindAndModify implements Executable
      * Constructs a findAndModify command.
      *
      * Supported options:
+     *
+     *  * arrayFilters (document array): A set of filters specifying to which
+     *    array elements an update should apply.
+     *
+     *    This is not supported for server versions < 3.6 and will result in an
+     *    exception at execution time if used.
      *
      *  * collation (document): Collation specification.
      *
@@ -104,6 +111,10 @@ class FindAndModify implements Executable
             'remove' => false,
             'upsert' => false,
         ];
+
+        if (isset($options['arrayFilters']) && ! is_array($options['arrayFilters'])) {
+            throw InvalidArgumentException::invalidType('"arrayFilters" option', $options['arrayFilters'], 'array');
+        }
 
         if (isset($options['bypassDocumentValidation']) && ! is_bool($options['bypassDocumentValidation'])) {
             throw InvalidArgumentException::invalidType('"bypassDocumentValidation" option', $options['bypassDocumentValidation'], 'boolean');
@@ -173,11 +184,15 @@ class FindAndModify implements Executable
      * @param Server $server
      * @return array|object|null
      * @throws UnexpectedValueException if the command response was malformed
-     * @throws UnsupportedException if collation or write concern is used and unsupported
+     * @throws UnsupportedException if array filters, collation, or write concern is used and unsupported
      * @throws DriverRuntimeException for other driver errors (e.g. connection errors)
      */
     public function execute(Server $server)
     {
+        if (isset($this->options['arrayFilters']) && ! \MongoDB\server_supports_feature($server, self::$wireVersionForArrayFilters)) {
+            throw UnsupportedException::arrayFiltersNotSupported();
+        }
+
         if (isset($this->options['collation']) && ! \MongoDB\server_supports_feature($server, self::$wireVersionForCollation)) {
             throw UnsupportedException::collationNotSupported();
         }
@@ -186,7 +201,7 @@ class FindAndModify implements Executable
             throw UnsupportedException::writeConcernNotSupported();
         }
 
-        $cursor = $server->executeCommand($this->databaseName, $this->createCommand($server));
+        $cursor = $server->executeReadWriteCommand($this->databaseName, $this->createCommand($server), $this->createOptions());
         $result = current($cursor->toArray());
 
         if ( ! isset($result->value)) {
@@ -238,6 +253,10 @@ class FindAndModify implements Executable
             }
         }
 
+        if (isset($this->options['arrayFilters'])) {
+            $cmd['arrayFilters'] = $this->options['arrayFilters'];
+        }
+
         if (isset($this->options['maxTimeMS'])) {
             $cmd['maxTimeMS'] = $this->options['maxTimeMS'];
         }
@@ -246,10 +265,23 @@ class FindAndModify implements Executable
             $cmd['bypassDocumentValidation'] = $this->options['bypassDocumentValidation'];
         }
 
+        return new Command($cmd);
+    }
+
+    /**
+     * Create options for executing the command.
+     *
+     * @see http://php.net/manual/en/mongodb-driver-server.executereadwritecommand.php
+     * @return array
+     */
+    private function createOptions()
+    {
+        $options = [];
+
         if (isset($this->options['writeConcern'])) {
-            $cmd['writeConcern'] = \MongoDB\write_concern_as_document($this->options['writeConcern']);
+            $options['writeConcern'] = $this->options['writeConcern'];
         }
 
-        return new Command($cmd);
+        return $options;
     }
 }

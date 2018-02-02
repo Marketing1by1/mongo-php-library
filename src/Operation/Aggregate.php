@@ -74,6 +74,9 @@ class Aggregate implements Executable
      *    This is not supported for server versions < 3.4 and will result in an
      *    exception at execution time if used.
      *
+     *  * comment (string): An arbitrary string to help trace the operation
+     *    through the database profiler, currentOp, and logs.
+     *
      *  * hint (string|document): The index to use. Specify either the index
      *    name as a string or the index key pattern as a document. If specified,
      *    then the query system will only consider plans using the hinted index.
@@ -88,6 +91,8 @@ class Aggregate implements Executable
      *    exception at execution time if used.
      *
      *  * readPreference (MongoDB\Driver\ReadPreference): Read preference.
+     *
+     *    This option is ignored if the $out stage is specified.
      *
      *  * typeMap (array): Type map for BSON deserialization. This will be
      *    applied to the returned Cursor (it is not sent to the server).
@@ -150,8 +155,16 @@ class Aggregate implements Executable
             throw InvalidArgumentException::invalidType('"collation" option', $options['collation'], 'array or object');
         }
 
+        if (isset($options['comment']) && ! is_string($options['comment'])) {
+            throw InvalidArgumentException::invalidType('"comment" option', $options['comment'], 'string');
+        }
+
         if (isset($options['hint']) && ! is_string($options['hint']) && ! is_array($options['hint']) && ! is_object($options['hint'])) {
             throw InvalidArgumentException::invalidType('"hint" option', $options['hint'], 'string or array or object');
+        }
+
+        if (isset($options['maxAwaitTimeMS']) && ! is_integer($options['maxAwaitTimeMS'])) {
+            throw InvalidArgumentException::invalidType('"maxAwaitTimeMS" option', $options['maxAwaitTimeMS'], 'integer');
         }
 
         if (isset($options['maxTimeMS']) && ! is_integer($options['maxTimeMS'])) {
@@ -224,11 +237,15 @@ class Aggregate implements Executable
             throw UnsupportedException::writeConcernNotSupported();
         }
 
+        $hasOutStage = \MongoDB\is_last_pipeline_operator_out($this->pipeline);
         $isCursorSupported = \MongoDB\server_supports_feature($server, self::$wireVersionForCursor);
-        $readPreference = isset($this->options['readPreference']) ? $this->options['readPreference'] : null;
 
         $command = $this->createCommand($server, $isCursorSupported);
-        $cursor = $server->executeCommand($this->databaseName, $command, $readPreference);
+        $options = $this->createOptions($hasOutStage);
+
+        $cursor = $hasOutStage
+            ? $server->executeReadWriteCommand($this->databaseName, $command, $options)
+            : $server->executeReadCommand($this->databaseName, $command, $options);
 
         if ($isCursorSupported && $this->options['useCursor']) {
             if (isset($this->options['typeMap'])) {
@@ -264,6 +281,7 @@ class Aggregate implements Executable
             'aggregate' => $this->collectionName,
             'pipeline' => $this->pipeline,
         ];
+        $cmdOptions = [];
 
         // Servers < 2.6 do not support any command options
         if ( ! $isCursorSupported) {
@@ -276,6 +294,12 @@ class Aggregate implements Executable
             $cmd['bypassDocumentValidation'] = $this->options['bypassDocumentValidation'];
         }
 
+        foreach (['comment', 'maxTimeMS'] as $option) {
+            if (isset($this->options[$option])) {
+                $cmd[$option] = $this->options[$option];
+            }
+        }
+
         if (isset($this->options['collation'])) {
             $cmd['collation'] = (object) $this->options['collation'];
         }
@@ -284,16 +308,8 @@ class Aggregate implements Executable
             $cmd['hint'] = is_array($this->options['hint']) ? (object) $this->options['hint'] : $this->options['hint'];
         }
 
-        if (isset($this->options['maxTimeMS'])) {
-            $cmd['maxTimeMS'] = $this->options['maxTimeMS'];
-        }
-
-        if (isset($this->options['readConcern'])) {
-            $cmd['readConcern'] = \MongoDB\read_concern_as_document($this->options['readConcern']);
-        }
-
-        if (isset($this->options['writeConcern'])) {
-            $cmd['writeConcern'] = \MongoDB\write_concern_as_document($this->options['writeConcern']);
+        if (isset($this->options['maxAwaitTimeMS'])) {
+            $cmdOptions['maxAwaitTimeMS'] = $this->options['maxAwaitTimeMS'];
         }
 
         if ($this->options['useCursor']) {
@@ -302,6 +318,33 @@ class Aggregate implements Executable
                 : new stdClass;
         }
 
-        return new Command($cmd);
+        return new Command($cmd, $cmdOptions);
+    }
+
+    /**
+     * Create options for executing the command.
+     *
+     * @see http://php.net/manual/en/mongodb-driver-server.executereadcommand.php
+     * @see http://php.net/manual/en/mongodb-driver-server.executereadwritecommand.php
+     * @param boolean $hasOutStage
+     * @return array
+     */
+    private function createOptions($hasOutStage)
+    {
+        $options = [];
+
+        if (isset($this->options['readConcern'])) {
+            $options['readConcern'] = $this->options['readConcern'];
+        }
+
+        if ( ! $hasOutStage && isset($this->options['readPreference'])) {
+            $options['readPreference'] = $this->options['readPreference'];
+        }
+
+        if ($hasOutStage && isset($this->options['writeConcern'])) {
+            $options['writeConcern'] = $this->options['writeConcern'];
+        }
+
+        return $options;
     }
 }

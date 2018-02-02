@@ -51,6 +51,9 @@ class CreateIndexes implements Executable
      *
      * Supported options:
      *
+     *  * maxTimeMS (integer): The maximum amount of time to allow the query to
+     *    run.
+     *
      *  * writeConcern (MongoDB\Driver\WriteConcern): Write concern.
      *
      *    This is not supported for server versions < 3.4 and will result in an
@@ -90,6 +93,10 @@ class CreateIndexes implements Executable
             $this->indexes[] = new IndexInput($index);
 
             $expectedIndex += 1;
+        }
+
+        if (isset($options['maxTimeMS']) && !is_integer($options['maxTimeMS'])) {
+            throw InvalidArgumentException::invalidType('"maxTimeMS" option', $options['maxTimeMS'], 'integer');
         }
 
         if (isset($options['writeConcern']) && ! $options['writeConcern'] instanceof WriteConcern) {
@@ -137,6 +144,23 @@ class CreateIndexes implements Executable
     }
 
     /**
+     * Create options for executing the command.
+     *
+     * @see http://php.net/manual/en/mongodb-driver-server.executewritecommand.php
+     * @return array
+     */
+    private function createOptions()
+    {
+        $options = [];
+
+        if (isset($this->options['writeConcern'])) {
+            $options['writeConcern'] = $this->options['writeConcern'];
+        }
+
+        return $options;
+    }
+
+    /**
      * Create one or more indexes for the collection using the createIndexes
      * command.
      *
@@ -150,11 +174,11 @@ class CreateIndexes implements Executable
             'indexes' => $this->indexes,
         ];
 
-        if (isset($this->options['writeConcern'])) {
-            $cmd['writeConcern'] = \MongoDB\write_concern_as_document($this->options['writeConcern']);
+        if (isset($this->options['maxTimeMS'])) {
+            $cmd['maxTimeMS'] = $this->options['maxTimeMS'];
         }
 
-        $server->executeCommand($this->databaseName, new Command($cmd));
+        $server->executeWriteCommand($this->databaseName, new Command($cmd), $this->createOptions());
     }
 
     /**
